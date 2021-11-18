@@ -1,0 +1,1500 @@
+---
+title: "PROJECT2"
+output: html_document
+---
+
+```{r}
+library(tidyverse)
+library(ggplot2)
+library(GGally)
+library(patchwork)
+library(caret)
+library(gbm)
+```
+
+## 1 Data Collection and Exploration
+
+### (b)
+
+```{r}
+I1 <- read.delim("imagem1.txt", sep = "", 
+                 header = FALSE)
+I2 <- read.delim("imagem2.txt", sep = "", 
+                 header = FALSE)
+I3 <- read.delim("imagem3.txt", sep = "", 
+                 header = FALSE)
+I1$type <- "image1"
+I2$type <- "image2"
+I3$type <- "image3"
+df_com <- rbind(I1, I2, I3)
+
+colnames(df_com) <- c("y_coordinate", 
+                      "x_coordinate", 
+                      "expert_label", 
+                      "NDAI", 
+                      "SD", 
+                      "CORR", 
+                      "DF", 
+                      "CF", 
+                      "BF", 
+                      "AF", 
+                      "AN",
+                      "types")
+
+# % of pixels for the different classes
+df_com %>%
+  group_by(types) %>%
+  mutate(num = n()) %>%
+  group_by(types, expert_label) %>%
+  summarize(percentage = n() / num) %>%
+  distinct(percentage)
+
+ggplot(df_com, aes(x = x_coordinate, 
+                   y = y_coordinate, 
+                   type = factor(expert_label), 
+                   col = factor(expert_label))) + 
+  geom_point(alpha = 0.5) +
+  facet_grid(~types) +
+  labs(title = "Maps", 
+       col = "Classes")
+```
+
+In all three images, there are obvious boundaries between different classes, which indicate that most close pixels (pair of coordinates) belong to the same class. For example, in image3, pixels whose x-coordinate $\ge 300$ are all in not-cloud class. Hence, an i.i.d. assumption is not justified for this dataset.
+
+### (c)
+
+```{r}
+# correlation within features
+df_com
+ggpairs(df_com[, 4:11])
+
+```
+Based on the correlation plot above, the highest correlation is 0.971 between Radiance angle AN and Radiance angle AF. Furthermore, correlation within all radiance variables are all above 0.5. Based on the original distribution of SD, we decided to perform a log transformation on it. After the transformation, we found there's a high correlation (0.810) between NDAI and SD, but correlation within other pairs of NDAI, SD, and CORR are not obvious. 
+
+
+
+```{r}
+# class label vs feature
+# we remove class 0
+clear_label <- df_com[df_com$expert_label != 0, ]
+
+# NDAI
+ndai_plot <- ggplot(clear_label, aes(x = factor(expert_label), y = NDAI)) +
+  geom_boxplot() +
+  labs(title = "NDAI distribution for each class",
+       x = "Class")
+
+#SD
+sd_plot <- ggplot(clear_label, aes(x = factor(expert_label), y = log(SD + 1))) +
+  geom_boxplot() +
+  labs(title = "SD distribution for each class",
+       x = "Class")
+
+# CORR ???
+corr_plot <- ggplot(clear_label, aes(x = factor(expert_label), y = CORR)) +
+  geom_boxplot() +
+  labs(title = "CORR distribution for each class",
+       x = "Class")
+
+
+# DF
+df_plot <- ggplot(clear_label, aes(x = factor(expert_label), y = DF)) +
+  geom_boxplot() +
+  labs(title = "DF distribution for each class",
+       x = "Class")
+
+# CF
+cf_plot <- ggplot(clear_label, aes(x = factor(expert_label), y = CF)) +
+  geom_boxplot() +
+  labs(title = "CF distribution for each class",
+       x = "Class")
+
+# BF
+bf_plot <- ggplot(clear_label, aes(x = factor(expert_label), y = BF)) +
+  geom_boxplot() +
+  labs(title = "BF distribution for each class",
+       x = "Class")
+
+# AF
+af_plot <- ggplot(clear_label, aes(x = factor(expert_label), y = AF)) +
+  geom_boxplot() +
+  labs(title = "AF distribution for each class",
+       x = "Class")
+
+# AN 
+an_plot <- ggplot(clear_label, aes(x = factor(expert_label), y = AN)) +
+  geom_boxplot() +
+  labs(title = "AN distribution for each class",
+       x = "Class")
+
+ndai_plot + sd_plot + corr_plot + df_plot + cf_plot +
+  bf_plot + af_plot + an_plot + plot_layout(nrow = 4)
+```
+We first exclude unlabeled observations, then we compare each feature's distribution for cloud and no-cloud class. Based on the boxplot, we noticed distribution differences for NDAI and SD between those two classes, specifically, cloud class has in average higher NDAI and SD compare to no-cloud class. However, for other radiance variables, there are slight distribution differences for BF, AF, and AN where no-cloud group has in average higher values.  
+
+
+
+## 2 Preparation
+
+### (a)
+
+#### Method 1
+```{r}
+x_interval <- (max(df_com$x_coordinate) - min(df_com$x_coordinate)) / 5
+y_interval <- (max(df_com$y_coordinate) - min(df_com$y_coordinate)) / 2
+x_block <- seq(min(df_com$x_coordinate), max(df_com$x_coordinate), by = x_interval)
+y_block <- seq(min(df_com$y_coordinate), max(df_com$y_coordinate), by = y_interval)
+
+find_block_pos <- function(num, block){
+  if (num <= min(block)){
+    return (1)
+  }
+  
+  if (num >= max(block)){
+    return (length(block) - 1)
+  }
+  
+  n <- length(block)
+  for (i in 1:n){
+    if (num <= block[i]){
+      return (i - 1)
+    }
+  }
+}
+
+group <- c()
+for (i in 1 : nrow(df_com)){
+  y_coordinate <- df_com[i, 1]
+  x_coordinate <- df_com[i, 2]
+  if (find_block_pos(y_coordinate, y_block) == 2){
+    group[i] <- 5 + find_block_pos(x_coordinate, x_block)
+  }else{
+    group[i] <- find_block_pos(x_coordinate, x_block)
+  }
+}
+
+df_com2 <- cbind(df_com, group)
+```
+
+Method 1: We divided the entire data into 10 blocks based on the range of x-coordinate and y-coordinate. Specifically, we divided x-axis into five blocks and y-axis into two blocks. Then for each observation, we identify the block number it belongs to. We realize the number of observations is uniform across all blocks. Then we decided to use 2 blocks as test set, 2 blocks as validation set and 8 blocks as training set. Specifically, we randomly sample four numbers from 1 to 10, then the first two numbers will be the test block number and the remaining two will be the validation block number. The rest blocks will be the training set.
+
+
+###### Method 2
+
+```{r}
+set.seed(123)
+# first image
+colnames(I1) <- c("y_coordinate", 
+                      "x_coordinate", 
+                      "expert_label", 
+                      "NDAI", 
+                      "SD", 
+                      "CORR", 
+                      "DF", 
+                      "CF", 
+                      "BF", 
+                      "AF", 
+                      "AN",
+                      "types")
+x_interval <- (max(I1$x_coordinate) - min(I1$x_coordinate)) / 5
+y_interval <- (max(I1$y_coordinate) - min(I1$y_coordinate)) / 2
+x_block <- seq(min(I1$x_coordinate), max(I1$x_coordinate), by = x_interval)
+y_block <- seq(min(I1$y_coordinate), max(I1$y_coordinate), by = y_interval)
+group <- c()
+for (i in 1 : nrow(I1)){
+  y_coordinate <- I1[i, 1]
+  x_coordinate <- I1[i, 2]
+  if (find_block_pos(y_coordinate, y_block) == 2){
+    group[i] <- 5 + find_block_pos(x_coordinate, x_block)
+  }else{
+    group[i] <- find_block_pos(x_coordinate, x_block)
+  }
+}
+I1 <- cbind(I1, group)
+
+# second image
+colnames(I2) <- c("y_coordinate", 
+                      "x_coordinate", 
+                      "expert_label", 
+                      "NDAI", 
+                      "SD", 
+                      "CORR", 
+                      "DF", 
+                      "CF", 
+                      "BF", 
+                      "AF", 
+                      "AN",
+                      "types")
+x_interval <- (max(I2$x_coordinate) - min(I2$x_coordinate)) / 5
+y_interval <- (max(I2$y_coordinate) - min(I2$y_coordinate)) / 2
+x_block <- seq(min(I2$x_coordinate), max(I2$x_coordinate), by = x_interval)
+y_block <- seq(min(I2$y_coordinate), max(I2$y_coordinate), by = y_interval)
+group <- c()
+for (i in 1 : nrow(I2)){
+  y_coordinate <- I2[i, 1]
+  x_coordinate <- I2[i, 2]
+  if (find_block_pos(y_coordinate, y_block) == 2){
+    group[i] <- 5 + find_block_pos(x_coordinate, x_block)
+  }else{
+    group[i] <- find_block_pos(x_coordinate, x_block)
+  }
+}
+I2 <- cbind(I2, group)
+
+# third image
+colnames(I3) <- c("y_coordinate", 
+                      "x_coordinate", 
+                      "expert_label", 
+                      "NDAI", 
+                      "SD", 
+                      "CORR", 
+                      "DF", 
+                      "CF", 
+                      "BF", 
+                      "AF", 
+                      "AN",
+                      "types")
+x_interval <- (max(I3$x_coordinate) - min(I3$x_coordinate)) / 5
+y_interval <- (max(I3$y_coordinate) - min(I3$y_coordinate)) / 2
+x_block <- seq(min(I3$x_coordinate), max(I3$x_coordinate), by = x_interval)
+y_block <- seq(min(I3$y_coordinate), max(I3$y_coordinate), by = y_interval)
+group <- c()
+for (i in 1 : nrow(I3)){
+  y_coordinate <- I3[i, 1]
+  x_coordinate <- I3[i, 2]
+  if (find_block_pos(y_coordinate, y_block) == 2){
+    group[i] <- 5 + find_block_pos(x_coordinate, x_block)
+  }else{
+    group[i] <- find_block_pos(x_coordinate, x_block)
+  }
+}
+I3 <- cbind(I3, group)
+
+image1.index <- sample(1:10, 2, replace = FALSE)
+image1.val.index <- image1.index[1]
+image1.test.index <- image1.index[2]
+image1.val.data <- I1 %>% filter(group == image1.val.index)
+image1.test.data <- I1 %>% filter(group == image1.test.index)
+image1.train.data <- I1 %>% filter(group != image1.val.index) %>% filter(group != image1.test.index)
+
+
+image2.index <- sample(1:10, 2, replace = FALSE)
+image2.val.index <- image2.index[1]
+image2.test.index <- image2.index[2]
+image2.val.data <- I2 %>% filter(group == image2.val.index)
+image2.test.data <- I2 %>% filter(group == image2.test.index)
+image2.train.data <- I2 %>% filter(group != image2.val.index) %>% filter(group != image2.test.index)
+
+image3.index <- sample(1:10, 2, replace = FALSE)
+image3.val.index <- image3.index[1]
+image3.test.index <- image3.index[2]
+image3.val.data <- I3 %>% filter(group == image3.val.index)
+image3.test.data <- I3 %>% filter(group == image3.test.index)
+image3.train.data <- I3 %>% filter(group != image3.val.index) %>% filter(group != image3.test.index)
+
+
+```
+
+Method 2: We divided three images respectively. For each image, we divide it into 9 blocks as the first method. Then we will randomly sample two numbers from 1 to 9 for each image: one for test set and the other for validation set. The rest 7 blocks are training set. Then we will combine training set, validation set and test set from three images to form our final sets.
+
+### (b)
+
+We use method 1 to split entire data set 
+
+```{r}
+set.seed(345)
+split_index <- sample(1:10, 4, replace = FALSE)
+
+test_index <- which(group == split_index[1] | group == split_index[2])
+valid_index <- which(group == split_index[3] | group == split_index[4])
+train_index <- group[-c(valid_index, test_index)] 
+
+
+df_com2 <- df_com2[, colnames(df_com2) != "types"]
+
+training_data <- df_com2[train_index, 3:11]
+training_data <- training_data[training_data$expert_label != 0, ]
+valid_data <- df_com2[valid_index, 3:11]
+valid_data <- valid_data[valid_data$expert_label != 0, ]
+test_data <- df_com2[test_index, 3:11]
+test_data <- test_data[test_data$expert_label != 0, ]
+
+paste0("The accuracy of a trivial classifier on vlidation set is: ", sum(valid_data$expert_label == -1) / nrow(valid_data))
+
+paste0("The accuracy of a trivial classifier on test set is: ", sum(test_data$expert_label == -1) / nrow(test_data))
+```
+When the test set is imbalanced, i.e. cloud-free observations takes a large proportion, the accuracy of this trivial classifier on test set will be high. 
+
+
+### (c)
+
+### single feature classifier 
+```{r}
+new_dat <- df_com2[df_com2$expert_label != 0, ]
+
+#NDAI
+misclass_error_NDAI <- c()
+for (i in seq(min(new_dat$NDAI), max(new_dat$NDAI), 0.001)){
+  tmp <- new_dat
+  index1 <- which(new_dat$NDAI >= i)
+  index2 <- which(new_dat$NDAI < i)
+  expert_label <- new_dat$expert_label
+  tmp$expert_label[index1] <- 1
+  tmp$expert_label[index2] <- -1
+  misclass_error_NDAI <- append(misclass_error_NDAI, mean(tmp$expert_label != expert_label))
+}
+
+#SD
+misclass_error_SD <- c()
+for (i in seq(min(new_dat$SD), max(new_dat$SD), 0.1)){
+  tmp <- new_dat
+  index1 <- which(new_dat$SD >= i)
+  index2 <- which(new_dat$SD < i)
+  expert_label <- new_dat$expert_label
+  tmp$expert_label[index1] <- 1
+  tmp$expert_label[index2] <- -1
+  misclass_error_SD <- append(misclass_error_SD, mean(tmp$expert_label != expert_label))
+}
+
+#CORR
+misclass_error_CORR <- c()
+for (i in seq(min(new_dat$CORR), max(new_dat$CORR), 0.001)){
+  tmp <- new_dat
+  index1 <- which(new_dat$CORR >= i)
+  index2 <- which(new_dat$CORR < i)
+  expert_label <- new_dat$expert_label
+  tmp$expert_label[index1] <- 1
+  tmp$expert_label[index2] <- -1
+  misclass_error_CORR <- append(misclass_error_CORR, mean(tmp$expert_label != expert_label))
+}
+
+#DF
+misclass_error_DF <- c()
+for (i in seq(min(new_dat$DF), max(new_dat$DF), 1)){
+  tmp <- new_dat
+  index1 <- which(new_dat$DF >= i)
+  index2 <- which(new_dat$DF < i)
+  expert_label <- new_dat$expert_label
+  tmp$expert_label[index1] <- 1
+  tmp$expert_label[index2] <- -1
+  misclass_error_DF <- append(misclass_error_DF, mean(tmp$expert_label != expert_label))
+}
+
+#CF
+misclass_error_CF <- c()
+for (i in seq(min(new_dat$CF), max(new_dat$CF), 1)){
+  tmp <- new_dat
+  index1 <- which(new_dat$CF >= i)
+  index2 <- which(new_dat$CF < i)
+  expert_label <- new_dat$expert_label
+  tmp$expert_label[index1] <- 1
+  tmp$expert_label[index2] <- -1
+  misclass_error_CF <- append(misclass_error_CF, mean(tmp$expert_label != expert_label))
+}
+
+#BF
+misclass_error_BF <- c()
+for (i in seq(min(new_dat$BF), max(new_dat$BF), 1)){
+  tmp <- new_dat
+  index1 <- which(new_dat$BF >= i)
+  index2 <- which(new_dat$BF < i)
+  expert_label <- new_dat$expert_label
+  tmp$expert_label[index1] <- 1
+  tmp$expert_label[index2] <- -1
+  misclass_error_BF <- append(misclass_error_BF, mean(tmp$expert_label != expert_label))
+}
+
+#AF
+misclass_error_AF <- c()
+for (i in seq(min(new_dat$AF), max(new_dat$AF), 1)){
+  tmp <- new_dat
+  index1 <- which(new_dat$AF >= i)
+  index2 <- which(new_dat$AF < i)
+  expert_label <- new_dat$expert_label
+  tmp$expert_label[index1] <- 1
+  tmp$expert_label[index2] <- -1
+  misclass_error_AF <- append(misclass_error_AF, mean(tmp$expert_label != expert_label))
+}
+
+#AN
+misclass_error_AN <- c()
+for (i in seq(min(new_dat$AN), max(new_dat$AN), 1)){
+  tmp <- new_dat
+  index1 <- which(new_dat$AN >= i)
+  index2 <- which(new_dat$AN < i)
+  expert_label <- new_dat$expert_label
+  tmp$expert_label[index1] <- 1
+  tmp$expert_label[index2] <- -1
+  misclass_error_AN <- append(misclass_error_AN, mean(tmp$expert_label != expert_label))
+}
+
+best_NDAI <- min(misclass_error_NDAI)
+best_SD <- min(misclass_error_SD)
+best_CORR <- min(misclass_error_CORR)
+best_DF <- min(misclass_error_DF)
+best_CF <- min(misclass_error_CF)
+best_BF <- min(misclass_error_BF)
+best_AF <- min(misclass_error_AF)
+best_AN <- min(misclass_error_AN)
+
+dat <- data.frame(feature = c("NDAI", "SD", "CORR", "DF", "CF", "BF", "AF", "AN"),
+                  error = c(best_NDAI, best_SD, best_CORR, best_DF, best_CF, best_BF, best_AF, best_AN))
+dat
+```
+
+
+# 3 Modeling 
+
+## (a) Method 1
+```{r}
+source("CVmaster.R")
+# METHOD 1
+# function to compute precision
+precision <- function(ypred, y){
+    tab <- table(ypred, y)
+    return((tab[2,2])/(tab[2,1]+tab[2,2]))
+}
+# function to compute recall
+recall <- function(ypred, y){
+    tab <- table(ypred, y)
+    return(tab[2,2]/(tab[1,2]+tab[2,2]))
+}
+
+# function to compute F1_score
+f1_score <- function(ypred, y){
+  pre <- precision(ypred, y)
+  rec <- recall(ypred, y)
+  return (2 * pre * rec / (pre + rec))
+}
+
+
+test_index <- which(df_com2$group == split_index[1] |  df_com2$group == split_index[2])
+
+training_data <- df_com2[-test_index, 3:12]
+test_data <- df_com2[test_index, 3:11]
+
+training_data <- training_data[training_data$expert_label != 0, ]
+test_data <- test_data[test_data$expert_label != 0, ]
+train_feature_1 <- training_data[, 2:10]
+train_label_1 <- training_data[, 1]
+test_feature_1 <- test_data[, 2:9]
+test_label_1 <- test_data[, 1]
+
+# Logistic Regression
+k = 3
+folds <- createFolds(unique(train_feature_1$group), k = k)
+
+best_lr <- NA
+highest_accuracy <- -Inf 
+res <- c()
+
+lr_train_label_1 <- train_label_1
+# in logistic regression, y has to be between 0 and 1
+lr_train_label_1[lr_train_label_1 == -1] <- 0
+lr_test_label_1 <- test_label_1
+lr_test_label_1[lr_test_label_1 == -1] <- 0
+
+cut_choices_lr <- seq(0.01, 0.99,by = 0.01)
+tpr_lr1 <- c()
+fpr_lr1 <- c()
+
+for (i in 1:k){
+    # print(i)
+    group_index <- folds[[i]]
+    validation_index <- train_feature_1$group %in% unique(train_feature_1$group)[group_index]
+    validation_feature <- train_feature_1[validation_index, 1:8]
+    validation_label <- lr_train_label_1[validation_index]
+    
+    train_feature <- train_feature_1[-validation_index, 1:8]
+    train_label <- lr_train_label_1[-validation_index]
+    
+    fit_lr <- glm(train_label ~., train_feature, family = "binomial")
+    predicted_value <- predict(fit_lr, validation_feature, type = "response")
+    tpr_tmp <- c()
+    fpr_tmp <- c()
+    for (c in cut_choices_lr){
+      predicted_label <- ifelse(predicted_value > c, 1, 0)
+      m <- confusionMatrix(as.factor(predicted_label), as.factor(validation_label))
+      tpr_tmp <- append(tpr_tmp, m$byClass[2])
+      fpr_tmp <- append(fpr_tmp, 1 - m$byClass[1])
+    }
+    
+    res[i] <- mean(predicted_label == validation_label)
+    if (highest_accuracy == -Inf){
+      highest_accuracy <- mean(predicted_label == validation_label)
+      best_lr <- fit_lr
+      tpr_lr1 <- tpr_tmp
+      fpr_lr1 <- fpr_tmp
+    }else if (res[i] > highest_accuracy){
+      highest_accuracy <- res[i]
+      best_lr <- fit_lr
+      tpr_lr1 <- tpr_tmp
+      fpr_lr1 <- fpr_tmp
+    }
+}
+
+
+predicted_value <- predict(best_lr, test_feature_1, type = "response")
+
+lr_df <- data.frame(FPR <- fpr_lr1,
+                    TPR <- tpr_lr1)
+lr_distance <- c()
+for (i in 1:length(fpr_lr1)){
+  lr_distance <- append(lr_distance, sqrt((1 - tpr_lr1[i])^2 + fpr_lr1[i]^2))
+}
+lr_cutoff_1 <- tpr_lr1[which.min(lr_distance)]
+lr_cutoff_2 <- fpr_lr1[which.min(lr_distance)]
+colnames(lr_df) <- c("FPR", "TPR")
+ggplot(lr_df, aes(x = FPR, y = TPR)) +
+  geom_point() + 
+  geom_point(x = lr_cutoff_2, y = lr_cutoff_1, 
+             color = "red") +
+  labs(x = "False Positive Rate", y = "True Positive Rate", title = "ROC of Logistic Regression")
+
+predicted_label <- ifelse(predicted_value > cut_choices_lr[which.min(lr_distance)], 1, 0)
+lr_test_accuracy <- mean(predicted_label == lr_test_label_1)
+lr_precision <- precision(predicted_label, lr_test_label_1)
+lr_recall <- recall(predicted_label, lr_test_label_1)
+lr_f1_score <- f1_score(predicted_label, lr_test_label_1)
+lr_cutoff_value <- cut_choices_lr[which.min(lr_distance)]
+```
+
+```{r}
+## SVM
+# apply CVMaster to tune C
+# scale train feature
+K = 3 # number of folds
+cost_choices <- seq(0.2, 1, by = 0.2)
+svm_val_accuracy <- CVmaster(model = "SVM",
+                             training_feature = train_feature_1,
+                             training_label = train_label_1,
+                             K = K,
+                             lf = "Classification Accuracy",
+                             cost_choices = cost_choices)
+
+optimal_c <- cost_choices[which.max(svm_val_accuracy[, K + 1])]
+# extract optimal_c index in the c_choices
+c_choices_index <- which(cost_choices == optimal_c)
+
+folds_index <- which.max(svm_val_accuracy[c_choices_index, ])
+folds <- createFolds(unique(train_feature_1$group), k = K)
+group_index <- folds[[folds_index]]
+validation_index <- train_feature_1$group %in% unique(train_feature_1$group)[group_index]
+validation_feature_extracted <- train_feature_1[validation_index, -ncol(train_feature_1)]
+validation_label_extracted <- as.factor(train_label_1[validation_index])
+
+train_feature_extracted <- train_feature_1[-validation_index, -ncol(train_feature_1)]
+train_label_extracted <- as.factor(train_label_1[-validation_index])
+
+# on validation set 
+svm_val_fit <- svm(x = train_feature_extracted,
+             y = train_label_extracted,
+             scale = TRUE,
+             kernel = "radial",
+             cost = optimal_c,
+             probability = TRUE)
+svm_val_pred <- predict(svm_val_fit, validation_feature_extracted, probability = TRUE)
+predicted_values <- attributes(svm_val_pred)$probabilities[, 1]
+
+cut_choices_svm <- seq(0.01, 0.99,by = 0.01)
+tpr_svm1 <- c()
+fpr_svm1 <- c()
+
+for (c in cut_choices_svm){
+  predicted_label <- ifelse(predicted_values > c, 1, -1)
+  m <- confusionMatrix(as.factor(predicted_label), as.factor(validation_label_extracted))
+  tpr_svm1 <- append(tpr_svm1, m$byClass[2])
+  fpr_svm1 <- append(fpr_svm1, 1 - m$byClass[1])
+}
+
+svm_df <- data.frame(FPR <- fpr_svm1,
+                    TPR <- tpr_svm1)
+distance_svm1 <- c()
+for (i in seq_along(fpr_svm1)){
+  distance_svm1 <- append(distance_svm1, sqrt((1 - tpr_svm1[i])^2 + fpr_svm1[i]^2))
+}
+
+svm_cutoff_1 <- tpr_svm1[which.min(distance_svm1)]
+svm_cutoff_2 <- fpr_svm1[which.min(distance_svm1)]
+
+colnames(svm_df) <- c("FPR", "TPR")
+ggplot(svm_df, aes(x = FPR, y = TPR)) +
+  geom_point() + 
+  geom_point(x = svm_cutoff_2, 
+             y = svm_cutoff_1, 
+             color = "red") +
+  labs(x = "False Positive Rate", y = "True Positive Rate", title = "ROC of SVM")
+
+
+svmfit = svm(x = train_feature_1[, -ncol(train_feature_1)],
+             y = as.factor(train_label_1),
+             scale = TRUE,
+             kernel = "radial",
+             cost = optimal_c,
+             probability = TRUE)
+
+## Metrics
+svm_pred <- predict(svmfit, test_feature_1, probability = FALSE)
+svm_test_accuracy <- mean(svm_pred == as.factor(test_label_1))
+svm_precision <- precision(svm_pred, as.factor(test_label_1))
+svm_recall <- recall(svm_pred, as.factor(test_label_1))
+svm_f1_score <- f1_score(svm_pred, as.factor(test_label_1))
+svm_cutoff_value <- cut_choices_svm[which.min(distance_svm1)]
+```
+
+
+```{r}
+## RF
+# apply CVmaster to tune mtry
+mtry_choices <- seq(3, ncol(train_feature_1) - 1)
+rf_val_accuracy <- CVmaster(model = "RF", 
+                            training_feature = train_feature_1, 
+                            training_label = train_label_1, 
+                            K = K, 
+                            lf = "Classification Accuracy", 
+                            mtry_choices = mtry_choices)
+
+optimal_mtry <- mtry_choices[which.max(rf_val_accuracy[, K + 1])]
+
+# extract optimal_c index in the c_choices
+mtry_choices_index <- which(mtry_choices == optimal_mtry)
+# folds_index <- 
+folds_index <- which.max(rf_val_accuracy[mtry_choices_index, ])
+folds <- createFolds(unique(train_feature_1$group), k = K)
+group_index <- folds[[folds_index]]
+validation_index <- train_feature_1$group %in% unique(train_feature_1$group)[group_index]
+validation_feature_extracted <- train_feature_1[validation_index, -ncol(train_feature_1)]
+validation_label_extracted <- as.factor(train_label_1[validation_index])
+
+train_feature_extracted <- train_feature_1[-validation_index, -ncol(train_feature_1)]
+train_label_extracted <- as.factor(train_label_1[-validation_index])
+
+rf_val_fit <- randomForest(x = train_feature_extracted,
+                       y = train_label_extracted,
+                       mtry = optimal_mtry,
+                       importance = TRUE)
+
+rf_val_pred <- predict(rf_val_fit, newdata = cbind(validation_feature_extracted, 
+                                                   validation_label_extracted), 
+                       type = "prob")
+predicted_val_values <- as.data.frame(rf_val_pred)[, 2]
+
+cut_choices_rf <- seq(0.01, 0.99,by = 0.01)
+tpr_rf1 <- c()
+fpr_rf1 <- c()
+
+for (c in cut_choices_rf){
+  predicted_label <- ifelse(predicted_val_values > c, 1, -1)
+  m <- confusionMatrix(as.factor(predicted_label), as.factor(validation_label_extracted))
+  tpr_rf1 <- append(tpr_rf1, m$byClass[2])
+  fpr_rf1 <- append(fpr_rf1, 1 - m$byClass[1])
+}
+
+rf_df <- data.frame(FPR <- fpr_rf1,
+                    TPR <- tpr_rf1)
+distance_rf1 <- c()
+for (i in seq_along(fpr_rf1)){
+  distance_rf1 <- append(distance_rf1, sqrt((1 - tpr_rf1[i])^2 + fpr_rf1[i]^2))
+}
+
+rf_cutoff_1 <- tpr_rf1[which.min(distance_rf1)]
+rf_cutoff_2 <- fpr_rf1[which.min(distance_rf1)]
+
+colnames(rf_df) <- c("FPR", "TPR")
+ggplot(rf_df, aes(x = FPR, y = TPR)) +
+  geom_point() + 
+  geom_point(x = rf_cutoff_2, 
+             y = rf_cutoff_1, 
+             color = "red") +
+  labs(x = "False Positive Rate", y = "True Positive Rate", title = "ROC of RF")
+
+rf_fit <- randomForest(x = train_feature_1[, -ncol(train_feature_1)],
+                       y = as.factor(train_label_1),
+                       mtry = optimal_mtry,
+                       importance = TRUE)
+
+## Metrics
+rf_pred <- predict(rf_fit, newdata = cbind(test_feature_1, as.factor(test_label_1)))
+rf_test_accuracy <- mean(rf_pred == as.factor(test_label_1))
+rf_precision <- precision(rf_pred, as.factor(test_label_1))
+rf_recall <- recall(rf_pred, as.factor(test_label_1))
+rf_f1_score <- f1_score(rf_pred, as.factor(test_label_1))
+rf_cutoff_value <- cut_choices_rf[which.min(distance_rf1)]
+```
+
+
+```{r}
+## Boosted Tree
+bt_train_label_1 <- as.integer(train_label_1)
+# gbm labels have to be between 0 and 1
+bt_train_label_1[bt_train_label_1 == -1] <- 0
+bt_test_label_1 <- as.integer(test_label_1)
+bt_test_label_1[bt_test_label_1 == -1] <- 0
+
+n.trees.choices <- seq(100, 500, by = 100)
+bt_val_accuracy <- CVmaster(model = "Boosted Trees", 
+                            training_feature = train_feature_1, 
+                            training_label = bt_train_label_1, 
+                            K = K, 
+                            lf = "Classification Accuracy", 
+                            n.trees.choices = n.trees.choices)
+
+optimal_ntrees <- n.trees.choices[which.max(bt_val_accuracy[, K + 1])]
+
+# extract optimal_c index in the c_choices
+n.trees_choices_index <- which(n.trees.choices == optimal_ntrees)
+# folds_index <- 
+folds_index <- which.max(bt_val_accuracy[which(n.trees.choices == optimal_ntrees), ])
+folds <- createFolds(unique(train_feature_1$group), k = K)
+group_index <- folds[[folds_index]]
+validation_index <- train_feature_1$group %in% unique(train_feature_1$group)[group_index]
+validation_feature_extracted <- train_feature_1[validation_index, -ncol(train_feature_1)]
+validation_label_extracted <- as.integer(bt_train_label_1[validation_index])
+validation_label_extracted[validation_label_extracted == -1] <- 0
+
+train_feature_extracted <- train_feature_1[-validation_index, -ncol(train_feature_1)]
+train_label_extracted <- as.integer(bt_train_label_1[-validation_index])
+train_label_extracted[train_label_extracted == -1] <- 0
+
+bt_val_fit <- gbm(train_label_extracted~., 
+              data = cbind(train_feature_extracted, train_label_extracted),
+              interaction.depth = 2,
+              distribution = "bernoulli",
+              n.trees = optimal_ntrees)
+
+bt_val_label <- predict(bt_val_fit, 
+                    newdata = cbind(validation_feature_extracted, validation_label_extracted), 
+                    "response", 
+                    n.trees = optimal_ntrees)
+
+
+bt_cutoff_choices <- seq(0.01, 0.99, by = 0.01)
+tpr_bt1 <- c()
+fpr_bt1 <- c()
+
+
+for (c in bt_cutoff_choices){
+  predicted_label <- as.integer(bt_val_label > c)
+  m <- confusionMatrix(as.factor(predicted_label), as.factor(validation_label_extracted))
+  tpr_bt1 <- append(tpr_bt1, m$byClass[2])
+  fpr_bt1 <- append(fpr_bt1, 1 - m$byClass[1])
+}
+
+bt_df <- data.frame(FPR <- fpr_bt1,
+                    TPR <- tpr_bt1)
+distance_bt1 <- c()
+for (i in 1:length(fpr_bt1)){
+  distance_bt1 <- append(distance_bt1, sqrt((1 - tpr_bt1[i])^2 + fpr_bt1[i]^2))
+}
+
+bt_cutoff_1 <- tpr_bt1[which.min(distance_bt1)]
+bt_cutoff_2 <- fpr_bt1[which.min(distance_bt1)]
+
+colnames(bt_df) <- c("FPR", "TPR")
+ggplot(bt_df, aes(x = FPR, y = TPR)) +
+  geom_point() + 
+  geom_point(x = bt_cutoff_2, 
+             y = bt_cutoff_1, 
+             color = "red") +
+  labs(x = "False Positive Rate", y = "True Positive Rate", title = "ROC of Boosting Tree")
+
+bt_fit <- gbm(bt_train_label_1~., 
+              data = cbind(train_feature_1[, -ncol(train_feature_1)], bt_train_label_1),
+              interaction.depth = 2,
+              distribution = "bernoulli",
+              n.trees = optimal_ntrees)
+
+bt_label <- predict(bt_fit, 
+                    newdata = cbind(test_feature_1, bt_test_label_1), 
+                    "response", 
+                    n.trees = optimal_ntrees)
+
+## Metrics
+bt_pred <- as.integer(bt_label > bt_cutoff_choices[which.min(distance_bt1)])
+bt_test_accuracy <- mean(bt_pred == bt_test_label_1)
+bt_precision <- precision(bt_pred, as.integer(bt_test_label_1))
+bt_recall <- recall(bt_pred, as.integer(bt_test_label_1))
+bt_f1_score <- f1_score(bt_pred, as.integer(bt_test_label_1))
+bt_cutoff_value <- bt_cutoff_choices[which.min(distance_bt1)]
+```
+
+## Method 2
+
+```{r}
+source("CVmaster.R")
+library(caret)
+
+
+training_data_2 <- rbind(image1.train.data,
+                       image2.train.data,
+                       image3.train.data,
+                       image1.val.data,
+                       image2.val.data,
+                       image3.val.data)
+
+test_data_2 <- rbind(image1.test.data,
+                   image2.test.data,
+                   image3.test.data)
+
+# remove column 'types' in train and test data
+training_data_2 <- training_data_2[, colnames(training_data_2) != "types"]
+test_data_2 <- test_data_2[, colnames(test_data_2) != "types"]
+
+# remove x-coordinate and y-coordinate
+training_data_2 <- training_data_2[, 3:12]
+test_data_2 <- test_data_2[, 3:11]
+
+# exclude 0 label and train_dat_2 only stores the feature for training purpose
+train_dat_2 <- training_data_2[training_data_2$expert_label != 0, ][, 2:10]
+train_label_2 <- training_data_2[training_data_2$expert_label != 0, ][, 1]
+
+# exclude 0 label and test_dat_2 only stores the FEATURES for testing purpose 
+# test data do not needs group info thus only the features; 
+test_dat_2 <- test_data_2[test_data_2$expert_label != 0, ][, 2:9]
+test_label_2 <- test_data_2[test_data_2$expert_label != 0, ][, 1]
+
+
+```
+
+# Logistic Regression
+
+```{r}
+k = 3
+# create folds based on group numbers 
+folds <- createFolds(unique(train_dat_2$group), k = k)
+
+# places to store the best logistic regression model; 
+best_lr_2 <- NA
+highest_accuracy_2 <- -Inf 
+res_2 <- c()
+
+# assign the train label to be used in LR and convert y has to be between 0 and 1 for TRAIN
+lr_train_label_2 <- train_label_2
+lr_train_label_2[lr_train_label_2 == -1] <- 0
+
+# convert the label for TEST
+lr_test_label_2 <- test_label_2
+lr_test_label_2[lr_test_label_2 == -1] <- 0
+
+cut_choices_lr <- seq(0.01, 0.99,by = 0.01)
+tpr_lr2 <- c()
+fpr_lr2 <- c()
+
+for (i in 1:k){
+  #print(i)
+  group_index <- folds[[i]]
+  validation_index <- train_dat_2$group %in% unique(train_dat_2$group)[group_index]
+  validation_feature <- train_dat_2[validation_index, 1:8]
+  validation_label <- lr_train_label_2[validation_index]
+    
+  train_feature_2_fit <- train_dat_2[-validation_index, 1:8]
+  #print(dim(train_feature_2))
+  training_label_2_fit <- lr_train_label_2[-validation_index]
+  #print(length(train_label_2))  
+  fit_lr_2 <- glm(training_label_2_fit ~., train_feature_2_fit, family = "binomial")
+  predicted_value <- predict(fit_lr_2, validation_feature, type = "response")
+  tpr_tmp <- c()
+  fpr_tmp <- c()
+  for (c in cut_choices_lr){
+    predicted_label <- ifelse(predicted_value > c, 1, 0)
+    m <- confusionMatrix(as.factor(predicted_label), as.factor(validation_label))
+    tpr_tmp <- append(tpr_tmp, m$byClass[2])
+    fpr_tmp <- append(fpr_tmp, 1 - m$byClass[1])
+    
+  }
+  
+
+  # validatino error
+  res_2[i] <- mean(predicted_label == validation_label)
+  if (highest_accuracy_2 == -Inf){
+    highest_accuracy_2 <- mean(predicted_label == validation_label)
+    best_lr_2 <- fit_lr_2
+    tpr_lr2 <- tpr_tmp
+    fpr_lr2 <- fpr_tmp
+    }else if (res_2[i] > highest_accuracy_2){
+    highest_accuracy_2 <- res_2[i]
+    best_lr_2 <- fit_lr_2
+    tpr_lr2 <- tpr_tmp
+    fpr_lr2 <- fpr_tmp
+    # predicted_label vs validation_label; 
+    }
+}
+
+# use the best LR model with LOWEST validation error to calculate the TEST accuracy
+predicted_value_2 <- predict(best_lr_2, test_dat_2, type = "response")
+
+# store them into a dataframe and rename it 
+lr2_res <- data.frame(FPR <- fpr_lr2,
+                    TPR <- tpr_lr2)
+colnames(lr2_res) <- c("FPR", "TPR")
+
+# calculate each pari of TPR and FPR with (0,1) distance 
+distance_lr2 <- c()
+for (i in 1:length(fpr_lr2)){
+  distance_lr2 <- append(distance_lr2, sqrt((1 - tpr_lr2[i])^2 + fpr_lr2[i]^2))
+}
+lr_cutoff_1 <- tpr_lr2[which.min(distance_lr2)]
+lr_cutoff_2 <- fpr_lr2[which.min(distance_lr2)]
+
+# draw the ROC curve 
+ggplot(lr2_res, aes(x = FPR, y = TPR)) +
+  geom_point() + 
+  geom_point(x = FPR[which.min(distance_lr2)], y = TPR[which.min(distance_lr2)], 
+             color = "red") +
+  labs(title = "Logistic Regression Method 2")
+
+## Metrics
+
+predicted_label_2 <- ifelse(predicted_value_2 > cut_choices_lr[which.min(distance_lr2)], 1, 0)
+lr_test_accuracy <- mean(predicted_label_2 == lr_test_label_2)
+lr_precision <- precision(predicted_label_2, lr_test_label_2)
+lr_recall <- recall(predicted_label_2, lr_test_label_2)
+lrf1_score <- f1_score(predicted_label_2, lr_test_label_2)
+lr_cutoff_value <- cut_choices_lr[which.min(distance_lr2)]
+
+```
+
+```{r}
+## SVM
+# apply CVMaster to tune C
+# scale train feature
+source("CVmaster.R")
+library(caret)
+K = 3 # number of folds
+cost_choices <- seq(0.2, 1, by = 0.2)
+svm_val_accuracy <- CVmaster(model = "SVM",
+                             training_feature = train_dat_2,
+                             training_label = train_label_2,
+                             K = K,
+                             lf = "Classification Accuracy",
+                             cost_choices = cost_choices)
+
+optimal_c <- cost_choices[which.max(svm_val_accuracy[, K + 1])]
+# extract optimal_c index in the c_choices
+c_choices_index <- which(cost_choices == optimal_c)
+
+folds_index <- which.max(svm_val_accuracy[c_choices_index, ])
+folds <- createFolds(unique(train_dat_2$group), k = K)
+group_index <- folds[[folds_index]]
+validation_index <- train_dat_2$group %in% unique(train_dat_2$group)[group_index]
+validation_feature_extracted <- train_dat_2[validation_index, -ncol(train_dat_2)]
+validation_label_extracted <- as.factor(train_label_2[validation_index])
+
+train_feature_extracted <- train_dat_2[-validation_index, -ncol(train_dat_2)]
+train_label_extracted <- as.factor(train_label_2[-validation_index])
+
+# on validation set 
+svm_val_fit <- svm(x = train_feature_extracted,
+             y = train_label_extracted,
+             scale = TRUE,
+             kernel = "radial",
+             cost = optimal_c,
+             probability = TRUE)
+svm_val_pred <- predict(svm_val_fit, validation_feature_extracted, probability = TRUE)
+predicted_values <- attributes(svm_val_pred)$probabilities[, 1]
+
+cut_choices_svm <- seq(0.01, 0.99,by = 0.01)
+tpr_svm2 <- c()
+fpr_svm2 <- c()
+
+for (c in cut_choices_svm){
+  predicted_label <- ifelse(predicted_values > c, 1, -1)
+  m <- confusionMatrix(as.factor(predicted_label), as.factor(validation_label_extracted))
+  tpr_svm2 <- append(tpr_svm2, m$byClass[2])
+  fpr_svm2 <- append(fpr_svm2, 1 - m$byClass[1])
+}
+
+svm_df <- data.frame(FPR <- fpr_svm2,
+                    TPR <- tpr_svm2)
+distance_svm2 <- c()
+for (i in seq_along(fpr_svm2)){
+  distance_svm2 <- append(distance_svm2, sqrt((1 - tpr_svm2[i])^2 + fpr_svm2[i]^2))
+}
+
+svm_cutoff_1 <- tpr_svm2[which.min(distance_svm2)]
+svm_cutoff_2 <- fpr_svm2[which.min(distance_svm2)]
+
+colnames(svm_df) <- c("FPR", "TPR")
+ggplot(svm_df, aes(x = FPR, y = TPR)) +
+  geom_point() + 
+  geom_point(x = svm_cutoff_2, 
+             y = svm_cutoff_1, 
+             color = "red") +
+  labs(x = "False Positive Rate", y = "True Positive Rate", title = "ROC of SVM")
+
+# on test set 
+svmfit = svm(x = train_dat_2[, -ncol(train_dat_2)],
+             y = as.factor(train_label_2),
+             scale = TRUE,
+             kernel = "radial",
+             cost = optimal_c,
+             probability = TRUE)
+
+
+## Metrics
+svm_pred <- predict(svmfit, test_dat_2, probability = FALSE)
+svm_test_accuracy <- mean(svm_pred == as.factor(test_label_2))
+svm_precision <- precision(svm_pred, as.factor(test_label_2))
+svm_recall <- recall(svm_pred, as.factor(test_label_2))
+svm_f1_score <- f1_score(svm_pred, as.factor(test_label_2))
+svm_cutoff_value <- cut_choices_svm[which.min(distance_svm2)]
+
+```
+
+```{r}
+## RF
+# apply CVmaster to tune mtry
+mtry_choices <- seq(3, ncol(train_dat_2) - 1)
+K = 3
+rf_val_accuracy <- CVmaster(model = "RF", 
+                            training_feature = train_dat_2, 
+                            training_label = train_label_2, 
+                            K = K, 
+                            lf = "Classification Accuracy", 
+                            mtry_choices = mtry_choices)
+
+optimal_mtry <- mtry_choices[which.max(rf_val_accuracy[, K + 1])]
+
+
+# extract optimal_c index in the c_choices
+mtry_choices_index <- which(mtry_choices == optimal_mtry)
+# folds_index <- 
+folds_index <- which.max(rf_val_accuracy[mtry_choices_index, ])
+folds <- createFolds(unique(train_dat_2$group), k = K)
+group_index <- folds[[folds_index]]
+validation_index <- train_dat_2$group %in% unique(train_dat_2$group)[group_index]
+validation_feature_extracted <- train_dat_2[validation_index, -ncol(train_dat_2)]
+validation_label_extracted <- as.factor(train_label_2[validation_index])
+
+train_feature_extracted <- train_dat_2[-validation_index, -ncol(train_dat_2)]
+train_label_extracted <- as.factor(train_label_2[-validation_index])
+
+rf_val_fit <- randomForest(x = train_feature_extracted,
+                       y = train_label_extracted,
+                       mtry = optimal_mtry,
+                       importance = TRUE)
+
+rf_val_pred <- predict(rf_val_fit, newdata = cbind(validation_feature_extracted, 
+                                                   validation_label_extracted), 
+                       type = "prob")
+predicted_val_values <- as.data.frame(rf_val_pred)[, 2]
+
+cut_choices_rf <- seq(0.01, 0.99,by = 0.01)
+tpr_rf2 <- c()
+fpr_rf2 <- c()
+
+for (c in cut_choices_rf){
+  predicted_label <- ifelse(predicted_val_values > c, 1, -1)
+  m <- confusionMatrix(as.factor(predicted_label), as.factor(validation_label_extracted))
+  tpr_rf2 <- append(tpr_rf2, m$byClass[2])
+  fpr_rf2 <- append(fpr_rf2, 1 - m$byClass[1])
+}
+
+rf_df <- data.frame(FPR <- fpr_rf2,
+                    TPR <- tpr_rf2)
+distance_rf2 <- c()
+for (i in seq_along(fpr_rf2)){
+  distance_rf2 <- append(distance_rf2, sqrt((1 - tpr_rf2[i])^2 + fpr_rf2[i]^2))
+}
+
+rf_cutoff_1 <- tpr_rf2[which.min(distance_rf2)]
+rf_cutoff_2 <- fpr_rf2[which.min(distance_rf2)]
+
+colnames(rf_df) <- c("FPR", "TPR")
+ggplot(rf_df, aes(x = FPR, y = TPR)) +
+  geom_point() + 
+  geom_point(x = rf_cutoff_2, 
+             y = rf_cutoff_1, 
+             color = "red") +
+  labs(x = "False Positive Rate", y = "True Positive Rate", title = "ROC of RF")
+
+
+# draw ROC
+
+
+
+# fit on test 
+rf_fit <- randomForest(x = train_dat_2[, -ncol(train_dat_2)],
+                       y = as.factor(train_label_2),
+                       mtry = optimal_mtry,
+                       importance = TRUE)
+
+
+## Metrics
+rf_pred <- predict(rf_fit, newdata = cbind(test_dat_2, as.factor(test_label_2)))
+rf_test_accuracy <- mean(rf_pred == as.factor(test_label_2))
+rf_precision <- precision(rf_pred, as.factor(test_label_2))
+rf_recall <- recall(rf_pred, as.factor(test_label_2))
+rf_f1_score <- f1_score(rf_pred, as.factor(test_label_2))
+rf_cutoff_value <- cut_choices_rf[which.min(distance_rf2)]
+
+varImpPlot(rf_fit)
+I1_test_index <- which(I1$group == image1.test.index)
+I2_test_index <- which(I2$group == image2.test.index)
+I3_test_index <- which(I3$group == image3.test.index)
+a <- c(I1_test_index, I2_test_index, I3_test_index)
+
+rf_val_accuracy
+```
+
+```{r}
+## Boosted Tree
+K = 3 
+bt_train_label_2 <- as.integer(train_label_2)
+# gbm labels have to be between 0 and 1
+bt_train_label_2[bt_train_label_2 == -1] <- 0
+bt_test_label_2 <- as.integer(test_label_2)
+bt_test_label_2[bt_test_label_2 == -1] <- 0
+
+n.trees.choices <- seq(100, 500, by = 100)
+bt_val_accuracy <- CVmaster(model = "Boosted Trees", 
+                            training_feature = train_dat_2, 
+                            training_label = bt_train_label_2, 
+                            K = K, 
+                            lf = "Classification Accuracy", 
+                            n.trees.choices = n.trees.choices)
+
+optimal_ntrees <- n.trees.choices[which.max(bt_val_accuracy[, K + 1])]
+
+# extract optimal_c index in the c_choices
+n.trees_choices_index <- which(n.trees.choices == optimal_ntrees)
+
+folds_index <- which.max(bt_val_accuracy[which(n.trees.choices == optimal_ntrees), ])
+folds <- createFolds(unique(train_dat_2$group), k = K)
+group_index <- folds[[folds_index]]
+validation_index <- train_dat_2$group %in% unique(train_dat_2$group)[group_index]
+validation_feature_extracted <- train_dat_2[validation_index, -ncol(train_dat_2)]
+validation_label_extracted <- as.integer(train_label_2[validation_index])
+validation_label_extracted[validation_label_extracted == -1] <- 0
+
+train_feature_extracted <- train_dat_2[-validation_index, -ncol(train_dat_2)]
+train_label_extracted <- as.integer(train_label_2[-validation_index])
+train_label_extracted[train_label_extracted == -1] <- 0
+
+bt_val_fit <- gbm(train_label_extracted~., 
+              data = cbind(train_feature_extracted, train_label_extracted),
+              interaction.depth = 2,
+              distribution = "bernoulli",
+              n.trees = optimal_ntrees)
+
+bt_val_label <- predict(bt_val_fit, 
+                    newdata = cbind(validation_feature_extracted, validation_label_extracted), 
+                    "response", 
+                    n.trees = optimal_ntrees)
+
+
+bt_cutoff_choices <- seq(0.01, 0.99, by = 0.01)
+tpr_bt2 <- c()
+fpr_bt2 <- c()
+
+
+for (c in bt_cutoff_choices){
+  predicted_label <- as.integer(bt_val_label > c)
+  m <- confusionMatrix(as.factor(predicted_label), as.factor(validation_label_extracted))
+  tpr_bt2 <- append(tpr_bt2, m$byClass[2])
+  fpr_bt2 <- append(fpr_bt2, 1 - m$byClass[1])
+}
+
+bt_df <- data.frame(FPR <- fpr_bt2,
+                    TPR <- tpr_bt2)
+distance_bt2 <- c()
+for (i in 1:length(fpr_bt2)){
+  distance_bt2 <- append(distance_bt2, sqrt((1 - tpr_bt2[i])^2 + fpr_bt2[i]^2))
+}
+
+
+colnames(bt_df) <- c("FPR", "TPR")
+ggplot(bt_df, aes(x = FPR, y = TPR)) +
+  geom_point() + 
+  geom_point(x = FPR[which.min(distance)], 
+             y = TPR[which.min(distance)], 
+             color = "red") +
+  labs(x = "False Positive Rate", y = "True Positive Rate", title = "ROC of Boosting Tree")
+
+# draw ROC
+
+## ROC
+threshold_values <- seq(0.01, 0.99, by = 0.01)
+tpr <- c()
+fpr <- c()
+bt_test_accuracy <- c()
+
+for (c in threshold_values){
+  predicted_label <- as.integer(bt_label > c)
+  m <- confusionMatrix(as.factor(predicted_label), as.factor(bt_test_label_2))
+  tpr <- append(tpr, m$byClass[2])
+  fpr <- append(fpr, 1 - m$byClass[1])
+  bt_test_accuracy <- append(bt_test_accuracy, mean(predicted_label == bt_test_label_2))
+}
+
+bt_df <- data.frame(FPR <- fpr,
+                    TPR <- tpr)
+distance <- c()
+for (i in 1:length(fpr)){
+  distance <- append(distance, sqrt((1 - tpr[i])^2 + fpr[i]^2))
+}
+
+bt_cutoff_1 <- tpr_bt2[which.min(distance_bt2)]
+bt_cutoff_2 <- fpr_bt2[which.min(distance_bt2)]
+
+colnames(bt_df) <- c("FPR", "TPR")
+ggplot(bt_df, aes(x = FPR, y = TPR)) +
+  geom_point() + 
+  geom_point(x = bt_cutoff_2, 
+             y = bt_cutoff_1, 
+             color = "red") +
+  labs(x = "False Positive Rate", y = "True Positive Rate", title = "ROC of Boosting Tree")
+
+# on test set
+bt_fit <- gbm(bt_train_label_2~., 
+              data = cbind(train_dat_2[, -ncol(train_dat_2)], bt_train_label_2),
+              interaction.depth = 2,
+              distribution = "bernoulli",
+              n.trees = optimal_ntrees)
+
+bt_label <- predict(bt_fit, 
+                    newdata = cbind(test_dat_2, bt_test_label_2), 
+                    "response", 
+                    n.trees = optimal_ntrees)
+
+## Metrics
+bt_pred <- as.integer(bt_label > bt_cutoff_choices[which.min(distance_bt2)])
+bt_test_accuracy <- mean(bt_pred == bt_test_label_2)
+bt_precision <- precision(bt_pred, as.integer(bt_test_label_2))
+bt_recall <- recall(bt_pred, as.integer(bt_test_label_2))
+bt_f1_score <- f1_score(bt_pred, as.integer(bt_test_label_2))
+bt_cutoff_value <- bt_cutoff_choices[which.min(distance_bt2)]
+```
+
+## (b)
+
+```{r}
+# Method 1 ROC curve
+
+method <- c("Logistic Regression")
+lr_df <- cbind(lr_df, method)
+
+method <- c("SVM")
+svm_df <- cbind(svm_df, method)
+
+method <- ("Random Forest")
+rf_df <- cbind(rf_df, method)
+
+method <- ("Boosting Tree")
+bt_df <- cbind(bt_df, method)
+
+df <- rbind(lr_df, svm_df, rf_df, bt_df)
+
+ggplot(df, aes(x = FPR, y = TPR, col = method)) +
+  geom_line() +
+  geom_point(x = lr_cutoff_2,
+             y = lr_cutoff_1,
+             color = "black") +
+  geom_point(x = svm_cutoff_2,
+             y = svm_cutoff_1,
+             color = "black") +
+  geom_point(x = rf_cutoff_2,
+             y = rf_cutoff_1,
+             color = "black") +
+  geom_point(x = bt_cutoff_2,
+             y = bt_cutoff_1,
+             color = "black") +
+  labs(x = "False Positive Rate", y = "True Positive Rate", title = "ROC Curve")
+```
+
+```{r}
+# Method 2 ROC curve
+
+method <- c("Logistic Regression")
+lr_df <- cbind(lr2_res, method)
+
+method <- c("SVM")
+svm_df <- cbind(svm_df, method)
+
+method <- ("Random Forest")
+rf_df <- cbind(rf_df, method)
+
+method <- ("Boosting Tree")
+bt_df <- cbind(bt_df, method)
+
+df <- rbind(lr_df, svm_df, rf_df, bt_df)
+
+ggplot(df, aes(x = FPR, y = TPR, col = method)) +
+  geom_line() +
+  geom_point(x = lr_cutoff_2,
+             y = lr_cutoff_1,
+             color = "black") +
+  geom_point(x = svm_cutoff_2,
+             y = svm_cutoff_1,
+             color = "black") +
+  geom_point(x = rf_cutoff_2,
+             y = rf_cutoff_1,
+             color = "black") +
+  geom_point(x = bt_cutoff_2,
+             y = bt_cutoff_1,
+             color = "black") +
+  labs(x = "False Positive Rate", y = "True Positive Rate", title = "ROC Curve")
+```
+
+## (c)
+
+```{r}
+model_result.1 <- data.frame(method = c("Logistic Regression", "SVM", "Random Forest", "Boosted Tree"),
+                             test_accuracy <- c(lr_test_accuracy, svm_test_accuracy, rf_test_accuracy, bt_test_accuracy),
+                             precision <- c(lr_precision, svm_precision, rf_precision, bt_precision),
+                             recall <- c(lr_recall, svm_recall, rf_recall, bt_recall),
+                             f1_score <- c(lr_f1_score, svm_f1_score, rf_f1_score, bt_f1_score),
+                             cutoff_value <- c(lr_cutoff_value, svm_cutoff_value, rf_cutoff_value, bt_cutoff_value))
+colnames(model_result.1) <- c("Method", "Test_accuracy", "Precision", "Recall", "F1_score", "Cutoff Value")
+model_result.1
+```
+
+```{r}
+options(digits = 3)
+model_result.2 <- data.frame(method = c("Logistic Regression", "SVM", "Random Forest", "Boosted Tree"),
+                             test_accuracy <- c(lr_test_accuracy, svm_test_accuracy, rf_test_accuracy, bt_test_accuracy),
+                             precision <- c(lr_precision, svm_precision, rf_precision, bt_precision),
+                             recall <- c(lr_recall, svm_recall, rf_recall, bt_recall),
+                             f1_score <- c(lrf1_score, svm_f1_score, rf_f1_score, bt_f1_score),
+                             cutoff_value <- c(lr_cutoff_value, svm_cutoff_value, rf_cutoff_value, bt_cutoff_value))
+colnames(model_result.2) <- c("Method", "Test_accuracy", "Precision", "Recall", "F1_score", "Cutoff Value")
+model_result.2
+```
+
+# Diagnostics
+
+## (a)
+
+```{r}
+varImpPlot(rf_fit)
+```
+
+```{r, include=TRUE}
+training_data <- df_com2[-valid_index, 3:12]
+test_data <- df_com2[valid_index, 3:11]
+
+training_data <- training_data[training_data$expert_label != 0, ]
+test_data <- test_data[test_data$expert_label != 0, ]
+train_feature_1 <- training_data[, 2:10]
+train_label_1 <- training_data[, 1]
+test_feature_1 <- test_data[, 2:9]
+test_label_1 <- test_data[, 1]
+
+ntrees.3 <- seq(500, 3000, by = 50)
+rf_test_error.3 <- c()
+for (n in ntrees.3){
+  rf <- randomForest(x = train_feature_1[, -ncol(train_feature_1)],
+                     y = as.factor(train_label_1),
+                     mtry = optimal_mtry,
+                     importance = TRUE,
+                     ntree = n)
+  pred <- predict(rf, newdata = cbind(test_feature_1, as.factor(test_label_1)))
+  rf_test_error.3 <- append(rf_test_error.3, mean(pred != as.factor(test_label_1)))
+  print(length(rf_test_error.3))
+}
+
+df <- data.frame(ntrees <- ntrees.3,
+                 valid_error <- rf_test_error.3)
+colnames(df) <- c("ntrees", "valid_error")
+ggplot(df, aes(x = ntrees, y = valid_error)) +
+  geom_line() +
+  scale_y_continuous(breaks = seq(min(valid_error), max(valid_error), by = 0.01)) +
+  labs(title = "Validation Error vs n.trees")
+```
+
+## (b)
+
+```{r}
+tmp <- df_com2[test_index, 1:3]
+true_dat <- tmp[tmp$expert_label != 0,]
+total_dat <- cbind(true_dat, rf_pred)
+colnames(total_dat) <- c("y", "x", "expert_label", "predicted_label")
+ggplot(total_dat, aes(x = x, y = y, col = as.factor(expert_label))) +
+  geom_point() +
+    labs(title = "Visualization of Expert Labels", 
+       col = "Classes")
+ggplot(total_dat, aes(x = x, y = y, col = as.factor(predicted_label))) +
+  geom_point() +
+    labs(title = "Visualization of Predicted Labels", 
+       col = "Classes")
+
+d <- df_com2[test_index, ]
+d <- d[d$expert_label !=0, ]
+d <- cbind(d, rf_pred)
+
+ni <- (max(d$NDAI) - min(d$NDAI)) / 3
+s <- seq(min(d$NDAI), max(d$NDAI), by = ni) 
+s
+dp1 <- d[d$NDAI >= s[1] & d$NDAI < s[2], ]
+mean(dp1$expert_label != dp1$rf_pred)
+
+dp2 <- d[d$NDAI >= s[2] & d$NDAI < s[3], ]
+mean(dp2$expert_label != dp2$rf_pred)
+
+dp3 <- d[d$NDAI >= s[3] & d$NDAI < s[4], ]
+mean(dp3$expert_label != dp3$rf_pred)
+
+
+```
+
+```{r}
+ni <- (max(d$SD) - min(d$SD)) / 3
+s <- seq(min(d$SD), max(d$SD), by = ni) 
+s
+dp1 <- d[d$SD >= s[1] & d$SD < s[2], ]
+mean(dp1$expert_label != dp1$rf_pred)
+
+dp2 <- d[d$SD >= s[2] & d$SD < s[3], ]
+mean(dp2$expert_label != dp2$rf_pred)
+
+dp3 <- d[d$SD >= s[3] & d$SD < s[4], ]
+mean(dp3$expert_label != dp3$rf_pred)
+```
+
+```{r}
+ni <- (max(d$CORR) - min(d$CORR)) / 3
+s <- seq(min(d$CORR), max(d$CORR), by = ni) 
+s
+dp1 <- d[d$CORR >= s[1] & d$CORR < s[2], ]
+mean(dp1$expert_label != dp1$rf_pred)
+
+dp2 <- d[d$CORR >= s[2] & d$CORR < s[3], ]
+mean(dp2$expert_label != dp2$rf_pred)
+
+dp3 <- d[d$CORR >= s[3] & d$CORR < s[4], ]
+mean(dp3$expert_label != dp3$rf_pred)
+```
+
+```{r}
+ni <- (max(d$AN) - min(d$AN)) / 3
+s <- seq(min(d$AN), max(d$AN), by = ni) 
+s
+dp1 <- d[d$AN >= s[1] & d$AN < s[2], ]
+mean(dp1$expert_label != dp1$rf_pred)
+
+dp2 <- d[d$AN >= s[2] & d$AN < s[3], ]
+mean(dp2$expert_label != dp2$rf_pred)
+
+dp3 <- d[d$AN >= s[3] & d$AN < s[4], ]
+mean(dp3$expert_label != dp3$rf_pred)
+```
+
+## (d)
+
+```{r}
+test_index <- c(which(test_data_2$group == 6), 
+                which(test_data_2$group == 2))
+tmp <- test_data_2[test_index, 1:3]
+true_dat <- tmp[tmp$expert_label != 0,]
+total_dat <- cbind(true_dat, rf_pred)
+colnames(total_dat) <- c("y", "x", "expert_label", "predicted_label")
+ggplot(total_dat, aes(x = x, y = y, col = as.factor(expert_label))) +
+  geom_point() +
+    labs(title = "Visualization of Expert Labels", 
+       col = "Classes")
+ggplot(total_dat, aes(x = x, y = y, col = as.factor(predicted_label))) +
+  geom_point() +
+    labs(title = "Visualization of Predicted Labels", 
+       col = "Classes")
+```
+
